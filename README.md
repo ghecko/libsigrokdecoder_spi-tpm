@@ -1,7 +1,7 @@
 # libsigrokdecoder_spi-tpm
 
 libsigrok stacked Protocol Decoder for TPM 2.0 transactions from an SPI bus.
-BitLocker Volume Master Key (VMK) are automatically extracted.
+BitLocker Volume Master Key (VMK) is automatically extracted.
 
 ## How to use
 
