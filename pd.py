@@ -25,7 +25,7 @@ from .lists import fifo_registers
 
 class Ann:
     """ Annotation ID """
-    READ, WRITE, ADDRESS, DATA, VMK = range(5)
+    READ, WRITE, ADDRESS, WAIT, DATA, VMK = range(6)
 
 
 class Operation:
@@ -64,6 +64,7 @@ class Transaction:
         self.end_sample_op = None
         self.end_sample_addr = None
         self.end_sample_data = None
+        self.end_sample_wait = None
         self.operation = operation
         self.address = bytearray()
         self.data = bytearray()
@@ -93,14 +94,20 @@ class Transaction:
                 register_name = fifo_registers[int.from_bytes(self.address, "big") & 0xffff]
             except KeyError:
                 register_name = "Unknown"
-            wait_str = '' if self.wait_count == 0 else ' (Waits: {})'.format(self.wait_count)
             data_str = ''.join('{:02x}'.format(x) for x in self.data)
             op_ann = ['Read', 'Rd'] if self.operation == Operation.READ else ['Write', 'Wr']
+            wait_ann = ['Wait', 'Wt']
             addr_ann = ['Register: {}'.format(register_name), '{}'.format(register_name)]
-            data_ann = ['{}{}'.format(data_str, wait_str), '{}'.format(data_str), data_str]
-            return ((self.start_sample, self.end_sample_op, op_ann),
-                    (self.end_sample_op, self.end_sample_addr, addr_ann),
-                    (self.end_sample_addr, self.end_sample_data, data_ann))
+            data_ann = ['{}'.format(data_str), '{}'.format(data_str), data_str]
+            if self.wait_count > 0:
+                return ((self.start_sample, self.end_sample_op, op_ann),
+                        (self.end_sample_op, self.end_sample_addr, addr_ann),
+                        (self.end_sample_addr, self.end_sample_wait, wait_ann),
+                        (self.end_sample_wait, self.end_sample_data, data_ann))
+            else:
+                return ((self.start_sample, self.end_sample_op, op_ann),
+                        (self.end_sample_op, self.end_sample_addr, addr_ann),
+                        (self.end_sample_addr, self.end_sample_data, data_ann))
         return None
 
 
@@ -119,18 +126,17 @@ class Decoder(srd.Decoder):
         ('Write', 'Write register operation'),
         ('Address', 'Register address'),
         ('Data', 'Data'),
+        ('Wait', 'Wait'),
         ('VMK', 'Extracted BitLocker VMK'),
     )
     annotation_rows = (
-        ('Transactions', 'TPM transactions', (0, 1, 2, 3)),
-        ('B-VMK', 'BitLocker Volume Master Key', (4,)),
-    )
-    options = (
-        {'id': 'wait_mask', 'desc': 'TPM Wait transfer Mask', 'default': '0x00',
-         'values': ('0x00', '0xFE')},
+        ('Transactions', 'TPM transactions', (0, 1, 2, 3, 4)),
+        ('B-VMK', 'BitLocker Volume Master Key', (5,)),
     )
 
     def __init__(self):
+        # TPM Profile Specification for TPM 2.0 page 133-134
+        self.wait_mask = 0x00
         self.end_wait = 0x01
         self.operation_mask = 0x80
         self.address_mask = 0x3f
@@ -178,7 +184,9 @@ class Decoder(srd.Decoder):
     def _transaction_wait(self, mosi, miso):
         self.current_transaction.wait_count += 1
         if miso == self.end_wait:
+            self.current_transaction.end_sample_wait = self.es
             self.state = TransactionState.TRANSFER_DATA
+            return
 
     def _transaction_read(self, mosi, miso):
         # TPM operation is defined on the 7th bit of the first byte of the transaction (1=read / 0=write)
@@ -203,14 +211,14 @@ class Decoder(srd.Decoder):
         # The transfer size byte is sent at the same time than the last byte address
         if self.current_transaction.is_address_complete():
             self.current_transaction.end_sample_addr = self.es
-            self.state = TransactionState.TRANSFER_DATA
+            if miso == self.wait_mask:
+                self.state = TransactionState.WAIT
+            else:
+                self.state = TransactionState.TRANSFER_DATA
             return
 
     def _transaction_data(self, mosi, miso):
         self.current_transaction.end_sample_data = self.es
-        if miso == self.wait_mask:
-            self.state = TransactionState.WAIT
-            return
         if self.current_transaction.operation == Operation.READ:
             self.current_transaction.data.extend(miso.to_bytes(1, byteorder='big'))
             self.recover_vmk(miso)
@@ -219,11 +227,19 @@ class Decoder(srd.Decoder):
         # Check if the transaction is complete
         annotation = self.current_transaction.frame()
         if annotation:
-            (op_ss, op_es, op_ann), (addr_ss, addr_es, addr_ann), (data_ss, data_es, data_ann) = annotation
-            self.put(op_ss, op_es, self.out_ann,
+            if self.current_transaction.wait_count == 0:
+                (op_ss, op_es, op_ann), (addr_ss, addr_es, addr_ann), (data_ss, data_es, data_ann) = annotation
+                self.put(op_ss, op_es, self.out_ann,
                      [Ann.READ if self.current_transaction.operation == Operation.READ else Ann.WRITE, op_ann])
-            self.put(addr_ss, addr_es, self.out_ann, [Ann.ADDRESS, addr_ann])
-            self.put(data_ss, data_es, self.out_ann, [Ann.DATA, data_ann])
+                self.put(addr_ss, addr_es, self.out_ann, [Ann.ADDRESS, addr_ann])
+                self.put(data_ss, data_es, self.out_ann, [Ann.DATA, data_ann])
+            else:
+                (op_ss, op_es, op_ann), (addr_ss, addr_es, addr_ann), (wait_ss, wait_es, wait_ann), (data_ss, data_es, data_ann) = annotation
+                self.put(op_ss, op_es, self.out_ann,
+                     [Ann.READ if self.current_transaction.operation == Operation.READ else Ann.WRITE, op_ann])
+                self.put(addr_ss, addr_es, self.out_ann, [Ann.ADDRESS, addr_ann])
+                self.put(wait_ss, wait_es, self.out_ann, [Ann.WAIT, wait_ann])
+                self.put(data_ss, data_es, self.out_ann, [Ann.DATA, data_ann])
             self.end_current_transaction()
 
     def check_vmk_header(self):
@@ -256,8 +272,6 @@ class Decoder(srd.Decoder):
                          [Ann.VMK, ['VMK: {}'.format(''.join('{:02x}'.format(x) for x in self.vmk))]])
 
     def decode(self, ss, es, data):
-        self.wait_mask = bytes.fromhex(self.options['wait_mask'].strip("0x"))
-
         self.ss, self.es = ss, es
 
         ptype, mosi, miso = data
