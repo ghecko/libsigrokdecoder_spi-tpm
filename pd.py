@@ -264,8 +264,11 @@ class Decoder(srd.Decoder):
             if len(self.vmk) == 0:
                 self.vmk_meta["vmk_ss"] = self.ss
             if len(self.vmk) < 32:
-                self.vmk.append(miso)
-                self.vmk_meta["vmk_es"] = self.es
+                # Check if the transaction actually got the VMK.
+                # Sometimes, other TPM transactions occurs when recovering the VMK
+                if fifo_registers[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+                    self.vmk.append(miso)
+                    self.vmk_meta["vmk_es"] = self.es
             else:
                 self.saving_vmk = False
                 self.put(self.vmk_meta["vmk_ss"], self.vmk_meta["vmk_es"], self.out_ann,
