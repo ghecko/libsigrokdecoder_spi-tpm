@@ -1,6 +1,6 @@
 # libsigrokdecoder_spi-tpm
 
-libsigrok stacked Protocol Decoder for TPM 2.0 transactions from an SPI bus.
+libsigrok stacked Protocol Decoder for TPM 2.0 & TPM 1.2 transactions from an SPI bus.
 BitLocker Volume Master Key (VMK) is automatically extracted.
 
 ## How to use
@@ -15,7 +15,7 @@ Example from a previous capture (Value Change Dump - .vcd format):
 
 2. Extracting BitLocker VMK (filter output to extract only VMK annotations)
 
-`.\sigrok-cli.exe -i C:\Users\jovre\Documents\tpm_spi_comm_2.vcd -I vcd:numchannels=6 -P spi:wordsize=8:cs_polarity=active-high:miso=libsigrok4DSL.3:mosi=libsigrok4DSL.1:clk=libsigrok4DSL.2:cs=libsigrok4DSL.0,spi_tpm:wait_mask=0x00 -A spi_tpm=VMK`
+`.\sigrok-cli.exe -i C:\Users\jovre\Documents\tpm_spi_comm_2.vcd -I vcd:numchannels=6 -P spi:wordsize=8:cs_polarity=active-high:miso=libsigrok4DSL.3:mosi=libsigrok4DSL.1:clk=libsigrok4DSL.2:cs=libsigrok4DSL.0,spi_tpm:tpm_version=1.2 -A spi_tpm=VMK`
 
 ***command output:***
 

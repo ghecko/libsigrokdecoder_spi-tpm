@@ -20,7 +20,7 @@
 import sigrokdecode as srd
 import re
 from collections import deque
-from .lists import fifo_registers
+from .lists import fifo_registers2, fifo_registers1
 
 
 class Ann:
@@ -86,12 +86,15 @@ class Transaction:
         """ Check if all address bytes are captured. """
         return len(self.address) == 3
 
-    def frame(self):
+    def frame(self, tpm_version):
         """ Return address and data annotation if the transaction is complete. """
         if self.is_complete():
             register_name = ""
             try:
-                register_name = fifo_registers[int.from_bytes(self.address, "big") & 0xffff]
+                if tpm_version == "2.0":
+                    register_name = fifo_registers2[int.from_bytes(self.address, "big") & 0xffff]
+                else:
+                    register_name = fifo_registers1[int.from_bytes(self.address, "big") & 0xffff]
             except KeyError:
                 register_name = "Unknown"
             data_str = ''.join('{:02x}'.format(x) for x in self.data)
@@ -133,10 +136,13 @@ class Decoder(srd.Decoder):
         ('Transactions', 'TPM transactions', (0, 1, 2, 3, 4)),
         ('B-VMK', 'BitLocker Volume Master Key', (5,)),
     )
+    options = (
+        {'id': 'tpm_version', 'desc': 'TPM Version 1.2 or 2.0', 'default': '2.0',
+         'values': ('2.0', '1.2')},
+    )
 
     def __init__(self):
         # TPM Profile Specification for TPM 2.0 page 133-134
-        self.wait_mask = 0x00
         self.end_wait = 0x01
         self.operation_mask = 0x80
         self.address_mask = 0x3f
@@ -208,7 +214,6 @@ class Decoder(srd.Decoder):
         # Get address bytes
         # Address is 3 bytes long
         self.current_transaction.address.extend(mosi.to_bytes(1, byteorder='big'))
-        # The transfer size byte is sent at the same time than the last byte address
         if self.current_transaction.is_address_complete():
             self.current_transaction.end_sample_addr = self.es
             if miso == self.wait_mask:
@@ -225,7 +230,7 @@ class Decoder(srd.Decoder):
         elif self.current_transaction.operation == Operation.WRITE:
             self.current_transaction.data.extend(mosi.to_bytes(1, byteorder='big'))
         # Check if the transaction is complete
-        annotation = self.current_transaction.frame()
+        annotation = self.current_transaction.frame(self.options['tpm_version'])
         if annotation:
             if self.current_transaction.wait_count == 0:
                 (op_ss, op_es, op_ann), (addr_ss, addr_es, addr_ann), (data_ss, data_es, data_ann) = annotation
@@ -255,18 +260,21 @@ class Decoder(srd.Decoder):
         """ Check if VMK is releasing """
         if not self.saving_vmk:
             # Add data to the circular buffer
-            self.queue.append(miso)
-            # Add sample number to meta queue
-            self.vmk_meta["s_queue"].append(self.ss)
-            # Check if VMK header retrieved
-            self.check_vmk_header()
+            # Check if the transaction actually got the VMK.
+            # Sometimes, other TPM transactions occurs when recovering the VMK
+            if fifo_registers1[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+                self.queue.append(miso)
+                # Add sample number to meta queue
+                self.vmk_meta["s_queue"].append(self.ss)
+                # Check if VMK header retrieved
+                self.check_vmk_header()
         else:
             if len(self.vmk) == 0:
                 self.vmk_meta["vmk_ss"] = self.ss
             if len(self.vmk) < 32:
                 # Check if the transaction actually got the VMK.
                 # Sometimes, other TPM transactions occurs when recovering the VMK
-                if fifo_registers[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+                if fifo_registers1[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
                     self.vmk.append(miso)
                     self.vmk_meta["vmk_es"] = self.es
             else:
@@ -275,6 +283,10 @@ class Decoder(srd.Decoder):
                          [Ann.VMK, ['VMK: {}'.format(''.join('{:02x}'.format(x) for x in self.vmk))]])
 
     def decode(self, ss, es, data):
+        if self.options['tpm_version'] == "2.0":
+            self.wait_mask = 0x00
+        else:
+            self.wait_mask = 0xFE       
         self.ss, self.es = ss, es
 
         ptype, mosi, miso = data
