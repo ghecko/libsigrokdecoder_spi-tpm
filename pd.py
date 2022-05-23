@@ -86,15 +86,12 @@ class Transaction:
         """ Check if all address bytes are captured. """
         return len(self.address) == 3
 
-    def frame(self, tpm_version):
+    def frame(self, fifo_registers):
         """ Return address and data annotation if the transaction is complete. """
         if self.is_complete():
             register_name = ""
             try:
-                if tpm_version == "2.0":
-                    register_name = fifo_registers2[int.from_bytes(self.address, "big") & 0xffff]
-                else:
-                    register_name = fifo_registers1[int.from_bytes(self.address, "big") & 0xffff]
+                register_name = fifo_registers[int.from_bytes(self.address, "big") & 0xffff]
             except KeyError:
                 register_name = "Unknown"
             data_str = ''.join('{:02x}'.format(x) for x in self.data)
@@ -154,6 +151,7 @@ class Decoder(srd.Decoder):
         self.reset()
         self.state_machine = None
         self.init_state_machine()
+        self.fifo_registers = None
 
     def reset(self):
         self.ss = self.es = 0
@@ -165,6 +163,12 @@ class Decoder(srd.Decoder):
 
     def start(self):
         self.out_ann = self.register(srd.OUTPUT_ANN)
+        if self.options['tpm_version'] == "2.0":
+            self.wait_mask = 0x00
+            self.fifo_registers = fifo_registers2
+        else:
+            self.wait_mask = 0xFE
+            self.fifo_registers = fifo_registers1
 
     def init_state_machine(self):
         self.state_machine = {
@@ -230,7 +234,7 @@ class Decoder(srd.Decoder):
         elif self.current_transaction.operation == Operation.WRITE:
             self.current_transaction.data.extend(mosi.to_bytes(1, byteorder='big'))
         # Check if the transaction is complete
-        annotation = self.current_transaction.frame(self.options['tpm_version'])
+        annotation = self.current_transaction.frame(self.fifo_registers)
         if annotation:
             if self.current_transaction.wait_count == 0:
                 (op_ss, op_es, op_ann), (addr_ss, addr_es, addr_ann), (data_ss, data_es, data_ann) = annotation
@@ -247,6 +251,15 @@ class Decoder(srd.Decoder):
                 self.put(data_ss, data_es, self.out_ann, [Ann.DATA, data_ann])
             self.end_current_transaction()
 
+    def _is_vmk_transaction(self):
+        try:
+            if self.fifo_registers[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+                return True
+            else:
+                return False
+        except KeyError:
+            return False
+
     def check_vmk_header(self):
         """ Check for VMK header """
         if self.queue[0] == 0x2c:
@@ -262,7 +275,7 @@ class Decoder(srd.Decoder):
             # Add data to the circular buffer
             # Check if the transaction actually got the VMK.
             # Sometimes, other TPM transactions occurs when recovering the VMK
-            if fifo_registers1[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+            if self._is_vmk_transaction():
                 self.queue.append(miso)
                 # Add sample number to meta queue
                 self.vmk_meta["s_queue"].append(self.ss)
@@ -274,7 +287,7 @@ class Decoder(srd.Decoder):
             if len(self.vmk) < 32:
                 # Check if the transaction actually got the VMK.
                 # Sometimes, other TPM transactions occurs when recovering the VMK
-                if fifo_registers1[int.from_bytes(self.current_transaction.address, "big") & 0xffff] == "TPM_DATA_FIFO_0":
+                if self._is_vmk_transaction():
                     self.vmk.append(miso)
                     self.vmk_meta["vmk_es"] = self.es
             else:
@@ -282,11 +295,7 @@ class Decoder(srd.Decoder):
                 self.put(self.vmk_meta["vmk_ss"], self.vmk_meta["vmk_es"], self.out_ann,
                          [Ann.VMK, ['VMK: {}'.format(''.join('{:02x}'.format(x) for x in self.vmk))]])
 
-    def decode(self, ss, es, data):
-        if self.options['tpm_version'] == "2.0":
-            self.wait_mask = 0x00
-        else:
-            self.wait_mask = 0xFE       
+    def decode(self, ss, es, data):       
         self.ss, self.es = ss, es
 
         ptype, mosi, miso = data
